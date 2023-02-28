@@ -1,0 +1,183 @@
+---
+title: "Boulder Peak Triathlon Race Data"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+---
+
+### **The goal of this project is to take race results data from a triathlon I recently completed and analyze it to better understand areas I did well in and areas where I can improve for better results.**
+
+### Steps of the project will include:
+1. Scraping the results table from a webpage and compiling it into a usable table
+2. Cleaning the table in R and performing basic analysis
+3. Exporting the data to Tableau where I can perform exploratory analysis and display my findings.
+
+
+```{r}
+library(tidyverse)
+#general purpose library with many useful tools and commands
+library(rvest)
+#commands for html
+library(RSelenium)
+#package necessary for opening a web instance through R
+library(netstat)
+#used to see and establish available TCP ports
+library(data.table)
+#loading necessary packages
+```
+
+I started by installing the necessary packages and set up my environment.
+
+The next step is to access the webpage with my race results, locate the table, and scrape data from said table.
+
+```{r}
+rD <- rsDriver(browser = "firefox",
+                             chromever = NULL,
+                             geckover = "latest",
+                             verbose = FALSE,
+                             port = free_port(),
+                             check = FALSE,
+                             iedrver = NULL)
+#set up RSelenium server and browser, establish port using netstat 'free_port'
+#If chrome version changes, chromever will need to be updated
+
+remDr <- rD$client
+
+remDr$open()
+remDr$navigate("https://racingunderground.racetecresults.com/results.aspx?CId=16436&RId=5047")
+#opens Selemium and navigates to Triathalon results page
+
+results_table <- remDr$findElement(using = "id", "ctl00_Content_Main_divGrid")
+#selects table element
+
+
+
+```
+
+The race results webpage has been successfully navigated to and the table containing the data located. The problem with simply trying to store these results in a table is that they are spread out over 8 pages and the web address does not change for each page. I need to find a way to cycle through each page and store the results.
+
+
+```{r}
+
+compiled_results_raw <- list()
+#create blank list to compile pages
+
+x = 2
+for (x in 2:8) {
+#setting up a for loop
+  
+results_table_html <- results_table$getPageSource()
+page <- read_html(results_table_html %>% unlist())
+results <- html_table(page) %>% .[[2]]
+#stores second table on html page into results
+compiled_results_raw <- rbindlist(list(compiled_results_raw, results))
+#the results from the current page are read and added to the compiled results table previous created
+  
+next_button <- remDr$findElement(using = "xpath", paste("//td[(((count(preceding-sibling::*) + 1) = ", x, ") and parent::*)]//a"))
+next_button$clickElement()
+#sets up and executes commands to cycle through web pages, simulating clicks
+#no 'next page' button is available on site so actual page numbers have to be used, updating for each loop
+}
+results_table_html <- results_table$getPageSource()
+page <- read_html(results_table_html %>% unlist())
+results <- html_table(page) %>% .[[2]]
+compiled_results_raw <- rbindlist(list(compiled_results_raw, results)) 
+#stores final 8th page into results after loops completion
+
+remDr$close()
+rD$server$stop()
+rm(rD)
+gc()
+system("taskkill /im java.exe /f", intern=FALSE, ignore.stdout=FALSE)
+#stop firefox instance and server
+```
+
+
+We got the data! A loop had to be set up to click and cycle through each page, adding the current displayed table results to the compiled results before clicking to the next page. Thats one major step down to start performing analysis. 
+
+Now the table needs to be analyzed to make sure the data was scraped properly and to see if any transformation are required.
+
+```{r}
+write.csv(compiled_results_raw, "Data/compiled_results_raw.csv", row.names = FALSE)
+
+glimpse(compiled_results_raw)
+
+```
+Using "Glimpse" it looks like we have 358 total results which is great, the exact number of total rows on the webpage. Initially, it is apparent there are a couple repeat columns and some columns that have unnecessary info for my analysis, such as "Fav" and "Share" which were used in the web browser to bookmark and share data to social media. Lets remove these unnecessary columns and rename some columns to more clear names.
+
+
+```{r}
+compiled_results <- compiled_results_raw
+#created new table to perform transformation on
+
+colnames(compiled_results)[6] <- "Info"
+colnames(compiled_results)[8] <- "Time_Duplicate"
+colnames(compiled_results)[9] <- "Cat_Gen_Pos"
+#Renamed several columns with duplicate names
+
+compiled_results <- subset( compiled_results, select = -c(Fav,Share,Info,Time_Duplicate,Cat_Gen_Pos))
+#Trimmed off unnecessary columns
+
+library(lubridate)
+
+compiled_results <- compiled_results %>%
+  mutate(Name=str_to_title(Name),
+         Time=hms(Time),
+         Swim=hms(Swim),
+         T1=hms(T1),
+         Cycle=hms(Cycle),
+         T2=hms(T2),
+         Run=hms(Run))
+#load lubridate and convert string values to hms format. Convert Name to Title Case.
+
+compiled_results <- compiled_results %>%
+  mutate(Time=period_to_seconds(Time),
+         Swim=period_to_seconds(Swim),
+         T1=period_to_seconds(T1),
+         Cycle=period_to_seconds(Cycle),
+         T2=period_to_seconds(T2),
+         Run=period_to_seconds(Run))
+#convert time to # of seconds for easier calculations in tableau
+
+```
+A new table has been created to perform all transformations on, leaving a table of the raw data scraped from the web. Unneccesary columns have been removed and certain columns have been converted to a more usable time format using lubridate. Now I am rechecking glimpse to the table was updated properly and run Summary to see if any initial insights can be gathered.
+
+
+```{r}
+
+glimpse(compiled_results)
+
+summary(compiled_results)
+
+
+```
+
+Several column names have spaces which could prove problematic during analysis. Changing these names to remove spaces. There are also NA's in several columns. This is likely due to competitors who did not finish the race. For the purposes of my analysis, I will be removing these competitors in a separate table.
+
+```{r}
+
+setnames(compiled_results,"Race No","Race_No")
+setnames(compiled_results,"Cat Pos","Cat_Pos")
+setnames(compiled_results,"Gen Pos","Gen_Pos")
+#Renamed potential problematic column names
+
+compiled_results_null <- na.omit(compiled_results)
+#creating a second table with null values removed for racers who did not finish
+
+summary(compiled_results_null)
+glimpse(compiled_results_null)
+print(as_tibble(compiled_results_null))
+
+write.csv(compiled_results, "Data/compiled_results.csv", row.names = FALSE)
+write.csv(compiled_results_null, "Data/compiled_results_null.csv", row.names = FALSE)
+#.csv's have been saved to the folder for use in visualizations.
+```
+The data has been successfully scraped and cleaned for use in analysis. That's another major step down!
+
+The next step will be to load the cleaned data into tableau and perform some exploratory analysis to see if there are any interesting insights to be gained.
+
+See link below to my Tableau Public profile for the visualizations created using the data.
+
+### [Boulder Peak Triathlon Results](https://public.tableau.com/app/profile/clayton.stewart/viz/BoulderPeakTriathlonResults/MyTriathalonResults#1)
+
